@@ -16,14 +16,16 @@ def fetch_gdelt_data(keywords, max_records=1000):
         response = requests.get(base_url, params=params)
         if response.status_code == 200:
             data = response.json()
+
             if "articles" in data:
                 for article in data["articles"]:
                     all_articles.append({
                         "title": article.get("title"),
-                        "text": article.get("seendate", "") + " " + article.get("title", ""),
+                        "text": article.get("title", ""),
                         "source": article.get("sourcecountry"),
                         "date": article.get("seendate")
                     })
+
     return pd.DataFrame(all_articles)
 
 def fetch_newsapi_data(api_key, keywords, page_size=100):
@@ -49,4 +51,5 @@ def fetch_newsapi_data(api_key, keywords, page_size=100):
                     "source": a["source"]["name"],
                     "date": a["publishedAt"]
                 })
+
     return pd.DataFrame(all_articles)
