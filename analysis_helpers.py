@@ -36,8 +36,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, classification_report
 from scipy.stats import kruskal
+
+
+RANDOM_STATE = 42
 
 
 def fetch_gdelt_window(query, start_dt, end_dt, max_records=250):
@@ -97,6 +100,44 @@ def clean_text(text):
     return text
 
 
+def classify_topic(text):
+    if pd.isna(text):
+        return "Other"
+
+    text = str(text).lower()
+
+    conflict_words = [
+        "attack", "war", "strike", "airstrike", "killed", "dead",
+        "bomb", "missile", "soldier", "hamas", "militant", "violence"
+    ]
+
+    protest_words = [
+        "protest", "march", "rally", "activist", "demonstration",
+        "student", "campus", "arrested"
+    ]
+
+    politics_words = [
+        "election", "vote", "government", "minister", "president",
+        "trump", "biden", "netanyahu", "deal", "ceasefire", "policy"
+    ]
+
+    aid_words = [
+        "aid", "humanitarian", "food", "medical", "hospital",
+        "relief", "children", "refugee"
+    ]
+
+    if any(word in text for word in conflict_words):
+        return "Conflict / Attack"
+    if any(word in text for word in protest_words):
+        return "Protest / Activism"
+    if any(word in text for word in politics_words):
+        return "Politics / Election"
+    if any(word in text for word in aid_words):
+        return "Aid / Humanitarian"
+
+    return "Other"
+
+
 def load_and_clean_data(force_refetch=False):
     query = '(Palestine OR Gaza OR "West Bank" OR "Israel conflict")'
     cache_file = "gdelt_palestine_feb_apr_2026.csv"
@@ -141,6 +182,7 @@ def load_and_clean_data(force_refetch=False):
 
     df["clean_text"] = df["title"].apply(clean_text)
     df["headline_length_words"] = df["clean_text"].str.split().apply(len)
+    df["topic_category"] = df["title"].apply(classify_topic)
 
     df = df[df["headline_length_words"] >= 4].copy()
     after_min_words = len(df)
@@ -158,7 +200,7 @@ def load_and_clean_data(force_refetch=False):
     for country in ml_countries:
         country_rows = df_ml[df_ml["source_country"] == country].sample(
             n=min_count,
-            random_state=42
+            random_state=RANDOM_STATE
         )
         balanced_parts.append(country_rows)
 
@@ -203,8 +245,8 @@ def plot_country_counts(df):
     plt.figure(figsize=(8, 4))
     bars = plt.bar(counts.index, counts.values)
 
-    plt.title(f"Headlines by Source Country\n{date_min} to {date_max}", fontsize=14)
-    plt.xlabel("Source Country")
+    plt.title(f"How Many Headlines Came From Each Country?\n{date_min} to {date_max}", fontsize=14)
+    plt.xlabel("Country")
     plt.ylabel("Number of Headlines")
 
     for bar in bars:
@@ -242,13 +284,46 @@ def plot_monthly_counts(df):
             label=country
         )
 
-    plt.title(f"Monthly Headline Coverage\n{date_min} to {date_max}", fontsize=14)
+    plt.title(f"When Did Each Country Cover Palestine the Most?\n{date_min} to {date_max}", fontsize=14)
     plt.xlabel("Month")
     plt.ylabel("Number of Headlines")
     plt.xticks(rotation=45)
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+    return monthly_counts
+
+
+def plot_topic_emphasis(df):
+    topic_order = [
+        "Conflict / Attack",
+        "Protest / Activism",
+        "Politics / Election",
+        "Aid / Humanitarian"
+    ]
+
+    topic_table = pd.crosstab(df["source_country"], df["topic_category"])
+
+    for topic in topic_order:
+        if topic not in topic_table.columns:
+            topic_table[topic] = 0
+
+    topic_table = topic_table[topic_order]
+
+    date_min = df["date"].min().date()
+    date_max = df["date"].max().date()
+
+    topic_table.plot(kind="bar", figsize=(8, 4))
+
+    plt.title(f"What Kind of Palestine Stories Does Each Country Emphasize?\n{date_min} to {date_max}", fontsize=14)
+    plt.xlabel("Country")
+    plt.ylabel("Number of Headlines")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+    return topic_table
 
 
 def plot_headline_length(df):
@@ -291,7 +366,7 @@ def plot_headline_length(df):
     return round(stat, 4), round(p_value, 6)
 
 
-def run_ml(df_ml):
+def prepare_ml(df_ml):
     X = df_ml["clean_text"]
     y = df_ml["source_country"]
 
@@ -299,7 +374,7 @@ def run_ml(df_ml):
         X,
         y,
         test_size=0.25,
-        random_state=42,
+        random_state=RANDOM_STATE,
         stratify=y
     )
 
@@ -307,40 +382,115 @@ def run_ml(df_ml):
     X_train_tfidf = vectorizer.fit_transform(X_train)
     X_test_tfidf = vectorizer.transform(X_test)
 
+    print("Countries used for ML:")
+    print(df_ml["source_country"].value_counts())
+    print("Training shape:", X_train_tfidf.shape)
+    print("Test shape:", X_test_tfidf.shape)
+
+    return X_train_tfidf, X_test_tfidf, y_train, y_test
+
+
+def run_logistic_regression(X_train_tfidf, X_test_tfidf, y_train, y_test):
     baseline_label = y_train.mode()[0]
     baseline_preds = np.full(len(y_test), baseline_label)
     baseline_acc = accuracy_score(y_test, baseline_preds)
 
-    log_reg = LogisticRegression(max_iter=2000, random_state=42)
+    log_reg = LogisticRegression(max_iter=2000, random_state=RANDOM_STATE)
     log_reg.fit(X_train_tfidf, y_train)
     log_preds = log_reg.predict(X_test_tfidf)
     log_acc = accuracy_score(y_test, log_preds)
 
-    naive_bayes = MultinomialNB()
-    naive_bayes.fit(X_train_tfidf, y_train)
-    nb_preds = naive_bayes.predict(X_test_tfidf)
+    print("Baseline label:", baseline_label)
+    print("Baseline accuracy:", round(baseline_acc, 4))
+    print("Logistic Regression accuracy:", round(log_acc, 4))
+
+    log_report = pd.DataFrame(
+        classification_report(y_test, log_preds, zero_division=0, output_dict=True)
+    ).transpose().round(3)
+
+    print("\nLogistic Regression Accuracy Report:")
+    return baseline_acc, log_acc, log_report, log_preds
+
+
+def run_naive_bayes(X_train_tfidf, X_test_tfidf, y_train, y_test, baseline_acc, log_acc):
+    nb_model = MultinomialNB()
+    nb_model.fit(X_train_tfidf, y_train)
+    nb_preds = nb_model.predict(X_test_tfidf)
     nb_acc = accuracy_score(y_test, nb_preds)
 
-    results = pd.DataFrame({
+    print("Naive Bayes accuracy:", round(nb_acc, 4))
+
+    nb_report = pd.DataFrame(
+        classification_report(y_test, nb_preds, zero_division=0, output_dict=True)
+    ).transpose().round(3)
+
+    print("\nNaive Bayes Accuracy Report:")
+
+    comparison_df = pd.DataFrame({
         "Model": ["Baseline", "Logistic Regression", "Naive Bayes"],
         "Accuracy": [baseline_acc, log_acc, nb_acc]
-    })
+    }).sort_values("Accuracy", ascending=False)
 
-    return results
+    return nb_acc, nb_report, comparison_df, nb_preds
 
 
-def plot_model_accuracy(results):
-    results = results.sort_values("Accuracy", ascending=False)
+def plot_model_accuracy(comparison_df, df_ml):
+    date_min = df_ml["date"].min().date()
+    date_max = df_ml["date"].max().date()
 
-    plt.figure(figsize=(7, 4))
-    bars = plt.bar(results["Model"], results["Accuracy"])
+    plt.figure(figsize=(8, 4))
+    bars = plt.bar(comparison_df["Model"], comparison_df["Accuracy"])
 
-    plt.title("Model Accuracy Comparison", fontsize=14)
+    plt.title(f"Which Model Worked Best?\n{date_min} to {date_max}", fontsize=14)
     plt.xlabel("Model")
     plt.ylabel("Accuracy")
     plt.ylim(0, 1.05)
 
     for bar in bars:
+        height = bar.get_height()
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + 0.02,
+            f"{height:.2f}",
+            ha="center"
+        )
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_f1_scores(y_test, log_preds, nb_preds, df_ml):
+    log_report_dict = classification_report(
+        y_test, log_preds, zero_division=0, output_dict=True
+    )
+
+    nb_report_dict = classification_report(
+        y_test, nb_preds, zero_division=0, output_dict=True
+    )
+
+    class_labels = sorted(list(set(y_test)))
+
+    log_f1 = [log_report_dict[label]["f1-score"] for label in class_labels]
+    nb_f1 = [nb_report_dict[label]["f1-score"] for label in class_labels]
+
+    x = np.arange(len(class_labels))
+    width = 0.35
+
+    date_min = df_ml["date"].min().date()
+    date_max = df_ml["date"].max().date()
+
+    plt.figure(figsize=(8, 4))
+    bars1 = plt.bar(x - width / 2, log_f1, width, label="Logistic Regression")
+    bars2 = plt.bar(x + width / 2, nb_f1, width, label="Naive Bayes")
+
+    plt.title(f"How Well Did Each Model Do for Each Country?\n{date_min} to {date_max}", fontsize=14)
+    plt.xlabel("Country")
+    plt.ylabel("F1 Score")
+    plt.xticks(x, class_labels)
+    plt.ylim(0, 1.05)
+    plt.legend()
+
+    for bar in list(bars1) + list(bars2):
         height = bar.get_height()
         plt.text(
             bar.get_x() + bar.get_width() / 2,
